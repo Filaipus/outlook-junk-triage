@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name        Outlook Junk Triage
 // @namespace   outlook-junk-triage
-// @version     0.3.0
-// @description Sort the Outlook.com Junk folder into fake vs real senders, save a report, and delete fakes received since the last run.
+// @version     0.4.0
+// @description Flag clearly fake senders in the Outlook.com Junk folder, mark senders fake or real in one click, delete fakes received since the last run, and collect unsubscribe links.
 // @homepageURL https://github.com/Filaipus/outlook-junk-triage
 // @updateURL   https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
 // @downloadURL https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
@@ -14,6 +14,8 @@
 
 /* eslint-disable no-undef */
 const DEFAULT_RULES = {
+  // Scan automatically (since the last run) whenever the Junk folder opens.
+  autoScan: true,
   // Throwaway TLDs that real senders rarely use.
   spamTlds: ['sbs', 'online', 'space', 'shop', 'website', 'surf', 'beer', 'top', 'xyz', 'icu', 'click', 'cfd',
     'lol', 'buzz', 'site', 'store', 'la', 'cl', 'np', 'mx'],
@@ -34,14 +36,17 @@ const DEFAULT_RULES = {
     'diqzbbp488@gmail.com', 'flrgvigvztjdncpqf9@gmail.com', 'iivzbylmooq@gmail.com',
     'sujitpal9661189248@gmail.com', 'hk3789130@gmail.com', 'muffingot93@gmail.com',
   ],
-  // Real companies the random-domain heuristic would otherwise catch.
-  realDomains: [
-    'porkbun.com', 'spotify.com', 'everythingisnew.pt', 'thegrid.com',
-  ],
+  // Real companies the heuristics would otherwise catch. Real lists win over every fake rule.
+  realDomains: ['porkbun.com', 'spotify.com', 'everythingisnew.pt', 'thegrid.com'],
+  realAddresses: [],
   scamSubjects: ['change phone number', 'primary contact number', 'phone number change', 'request to withdraw',
     'verification key to restore', 'payment issue for your mcafee', 'your files are deleted',
     'payment method declined'],
 };
+
+// Shared mail providers: mark single addresses there, never the whole domain.
+const SHARED_PROVIDERS = ['gmail.com', 'googlemail.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com',
+  'yahoo.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me', 'protonmail.com'];
 
 // Your Rules are added to the defaults (lists are combined), so updates to the defaults still reach you.
 function mergeRules(defaults, stored) {
@@ -52,14 +57,14 @@ function mergeRules(defaults, stored) {
   return out;
 }
 
-const HIDDEN_CHARS = /[\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}\u05B0-\u05C7]/u;
+const HIDDEN_CHARS = /[\u{E0000}-\u{E007F}\u{E0100}-\u{E01EF}ְ-ׇ]/u;
 
 // Returns why a sender is clearly fake, or null when it looks real. Row: {name, addr, subj}.
 function classify(row, rules) {
   const addr = (row.addr || '').toLowerCase();
   if (!addr) return 'no sender address';
   const dom = addr.split('@')[1] || '';
-  if (rules.realDomains.includes(dom)) return null;
+  if ((rules.realAddresses || []).includes(addr) || rules.realDomains.includes(dom)) return null;
   if (rules.fakeDomains.includes(dom) || rules.fakeAddresses.includes(addr)) return 'known scam sender';
   if (!dom.includes('.')) return 'no real domain';
   if (/\.com[a-z0-9]{10,}$|\.us-[a-z0-9]+$/.test(dom)) return 'garbage domain';
@@ -73,6 +78,25 @@ function classify(row, rules) {
   const subj = (row.subj || '').toLowerCase();
   if (rules.scamSubjects.some(s => subj.includes(s))) return 'account-scam template';
   return null;
+}
+
+// Updates your stored rules when you mark a sender fake or real. Returns the new stored rules, or
+// null when the row has no address to mark.
+// shortcut: marking a default realDomains entry fake has no effect (real lists win); edit the
+// default list if that is ever needed.
+function applyMark(stored, addr, verdict) {
+  addr = (addr || '').toLowerCase();
+  const dom = addr.split('@')[1];
+  if (!dom) return null;
+  const shared = SHARED_PROVIDERS.includes(dom);
+  const out = { ...stored };
+  const list = k => (out[k] = [...(out[k] || [])]);
+  const add = (k, v) => { if (!list(k).includes(v)) out[k].push(v); };
+  const drop = (k, v) => { out[k] = list(k).filter(x => x !== v); };
+  if (verdict === 'fake') {
+    if (shared) { add('fakeAddresses', addr); drop('realAddresses', addr); } else { add('fakeDomains', dom); drop('realDomains', dom); }
+  } else if (shared) { add('realAddresses', addr); drop('fakeAddresses', addr); } else { add('realDomains', dom); drop('fakeDomains', dom); }
+  return out;
 }
 
 // Outlook shows "10:16" (today), "Tue 10/20" (this year) or "26/10/14" (yy/mm/dd, older).
@@ -101,17 +125,31 @@ function parseRowText(text) {
   };
 }
 
+// True when dates (newest first, nulls skipped) never go up: the list is sorted newest first.
+function isNewestFirst(dates) {
+  const d = dates.filter(Boolean);
+  return d.every((x, i) => i === 0 || x <= d[i - 1]);
+}
+
 function init() {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
-  const load = () => { try { return mergeRules(DEFAULT_RULES, JSON.parse(GM_getValue('rules', '{}'))); } catch { return DEFAULT_RULES; } };
+  const stored = () => { try { return JSON.parse(GM_getValue('rules', '{}')); } catch { return {}; } };
+  const load = () => mergeRules(DEFAULT_RULES, stored());
   let rules = load();
   let stopRequested = false;
+  let busy = false;
   let lastScan = null;
+  let autoScanned = false;
+  let unsubLinks = [];
 
+  const onJunk = () => location.pathname.includes('/junkemail');
   const rowsNow = () => [...document.querySelectorAll('[role="listbox"] [role="option"]')];
   const scroller = () => document.querySelector('[role="listbox"] .customScrollBar');
+  const rowId = o => o.getAttribute('data-convid') || o.id || o.innerText.slice(0, 200);
   const checkbox = o => o.querySelector('[role=checkbox]');
   const isChecked = o => checkbox(o)?.getAttribute('aria-checked') === 'true';
+  const isSelected = o => isChecked(o) || o.getAttribute('aria-selected') === 'true';
+  // Our row buttons draw their labels with CSS ::after, so they never show up in innerText.
   const rowInfo = o => { const r = parseRowText(o.innerText); return { ...r, date: parseDate(r.lines, new Date()), why: classify(r, rules) }; };
   const deleteButton = () => [...document.querySelectorAll('button')]
     .find(b => /^Delete$/i.test((b.getAttribute('aria-label') || b.innerText || '').trim().split('\n')[0]));
@@ -122,58 +160,124 @@ function init() {
   const since = () => (cutoff().getTime() ? `since ${cutoff().toDateString()}` : 'in the whole folder');
   // Outlook stops rendering the list in background tabs, so pause until the tab is visible again.
   const waitVisible = async () => { while (document.visibilityState !== 'visible') { status('Paused: bring this tab to the front'); await sleep(1000); } };
+  const fewRowsTip = () => (rowsNow().length && rowsNow().length < 10
+    ? '\n\nTip: View → Layout → Reading pane: Hide, and Density: Compact, fit more rows per batch.' : '');
+  const listMissing = 'Could not find the message list. Open the Junk Email folder; if it is open, Outlook changed its page (see CLAUDE.md).';
+
+  // --- styles (row tint + row buttons) ---
+  const css = document.createElement('style');
+  css.textContent = `
+    [role="option"][data-jt="fake"] { background: rgba(220, 50, 50, .12) !important; }
+    [data-jt-ui] { position: absolute; right: 44px; top: 4px; z-index: 5; display: flex; gap: 4px; font: 11px system-ui; }
+    [data-jt-ui] [data-why]::after { content: attr(data-why); color: #b33; padding: 1px 4px; }
+    [data-jt-btn] { border: 1px solid #999; border-radius: 4px; background: #fff; cursor: pointer; padding: 0 5px; opacity: .25; }
+    [role="option"]:hover [data-jt-btn] { opacity: 1; }
+    [data-jt-btn="fake"]::after { content: "✗ fake"; color: #b33; }
+    [data-jt-btn="real"]::after { content: "✓ real"; color: #286; }`;
 
   // --- panel ---
   const panel = document.createElement('div');
-  panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99999;background:#fff;color:#222;border:1px solid #888;border-radius:8px;padding:10px;font:13px system-ui;box-shadow:0 2px 10px rgba(0,0,0,.25);width:300px';
+  panel.style.cssText = 'position:fixed;right:16px;bottom:16px;z-index:99999;background:#fff;color:#222;border:1px solid #888;border-radius:8px;padding:10px;font:13px system-ui;box-shadow:0 2px 10px rgba(0,0,0,.25);width:320px';
   // Outlook enforces Trusted Types, so build the panel with DOM calls instead of innerHTML.
   const title = document.createElement('b'); title.textContent = 'Junk Triage';
   const bar = document.createElement('div'); bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:8px 0';
-  [['scan', 'Scan'], ['delete', 'Delete fakes'], ['report', 'Save report'], ['rules', 'Rules'], ['stop', 'Stop']].forEach(([a, label]) => {
-    const b = document.createElement('button'); b.dataset.a = a; b.textContent = label; bar.appendChild(b);
-  });
+  [['scan', 'Scan'], ['delete', 'Delete fakes'], ['unsub', 'Unsubscribe links'], ['report', 'Save report'], ['rules', 'Rules'], ['stop', 'Stop']]
+    .forEach(([a, label]) => { const b = document.createElement('button'); b.dataset.a = a; b.textContent = label; bar.appendChild(b); });
   const statusLine = document.createElement('div'); statusLine.style.whiteSpace = 'pre-wrap';
-  panel.append(title, bar, statusLine);
+  const list = document.createElement('div'); list.style.cssText = 'max-height:220px;overflow:auto;margin-top:6px';
+  panel.append(title, bar, statusLine, list);
   const status = msg => { statusLine.textContent = msg; };
+  const badge = text => { title.textContent = text ? `Junk Triage — ${text}` : 'Junk Triage'; };
+
+  // --- row decoration: tint fakes, show the reason, and add fake/real buttons ---
+  function decorate() {
+    for (const o of rowsNow()) {
+      const r = rowInfo(o);
+      o.dataset.jt = r.why ? 'fake' : 'real';
+      let ui = o.querySelector('[data-jt-ui]');
+      if (!ui) {
+        ui = document.createElement('span'); ui.dataset.jtUi = '';
+        const why = document.createElement('span'); why.dataset.why = '';
+        const f = document.createElement('button'); f.dataset.jtBtn = 'fake'; f.title = 'Mark this sender as fake';
+        const g = document.createElement('button'); g.dataset.jtBtn = 'real'; g.title = 'Mark this sender as real';
+        ui.append(why, f, g);
+        if (getComputedStyle(o).position === 'static') o.style.position = 'relative';
+        o.appendChild(ui);
+      }
+      ui.querySelector('[data-why]').dataset.why = r.why || '';
+      ui.style.display = r.addr ? 'flex' : 'none';
+    }
+  }
+
+  // Capture phase, so Outlook never sees the click and opens the message.
+  for (const type of ['mousedown', 'mouseup', 'click']) {
+    window.addEventListener(type, e => {
+      const btn = e.target.closest && e.target.closest('[data-jt-btn]');
+      if (!btn) return;
+      e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation();
+      if (type !== 'click') return;
+      const row = btn.closest('[role="option"]');
+      const r = row && rowInfo(row);
+      const next = r && applyMark(stored(), r.addr, btn.dataset.jtBtn);
+      if (!next) return;
+      GM_setValue('rules', JSON.stringify(next)); rules = load(); lastScan = null; decorate();
+      const dom = r.addr.split('@')[1];
+      status(`Marked ${SHARED_PROVIDERS.includes(dom) ? r.addr : dom} as ${btn.dataset.jtBtn}.`);
+    }, true);
+  }
+
   // Outlook re-renders <body> and drops foreign nodes, so live on <html> and re-attach if removed.
   setInterval(() => {
+    if (!css.isConnected) document.documentElement.appendChild(css);
     if (!panel.isConnected) document.documentElement.appendChild(panel);
-    panel.style.display = location.pathname.includes('/junkemail') ? '' : 'none';
-  }, 1000);
-  document.documentElement.appendChild(panel);
+    panel.style.display = onJunk() ? '' : 'none';
+    if (!onJunk()) { autoScanned = false; return; }
+    decorate();
+    if (rules.autoScan && !autoScanned && !busy && document.visibilityState === 'visible' && rowsNow().length) {
+      autoScanned = true;
+      run(() => scan({ untilCutoff: true }));
+    }
+  }, 700);
 
-  async function scan() {
+  async function run(task) {
+    if (busy) return status('Busy — press Stop first.');
+    busy = true; stopRequested = false;
+    try { await task(); } catch (err) { status('Error: ' + err.message); } finally { busy = false; }
+  }
+
+  // Scrolls the list (or only the part since the last run) and counts fake vs real senders.
+  async function scan({ untilCutoff = false } = {}) {
     const sc = scroller();
-    if (!sc) return status('Open the Junk Email folder first.');
+    if (!sc) return status(listMissing);
+    const cut = ymd(cutoff());
     sc.scrollTop = 0; await sleep(800);
     const seen = new Map(); let stale = 0; let last = -1;
     while (stale < 10 && !stopRequested) {
       await waitVisible();
-      for (const o of rowsNow()) {
-        const id = o.getAttribute('data-convid') || o.id || o.innerText.slice(0, 200);
+      const rows = rowsNow();
+      for (const o of rows) {
+        const id = rowId(o);
         if (!seen.has(id)) { const r = rowInfo(o); seen.set(id, { name: r.name, addr: r.addr, subj: r.subj, date: r.date && ymd(r.date), why: r.why }); }
       }
+      if (untilCutoff) { const ds = rows.map(o => rowInfo(o).date).filter(Boolean); if (ds.length && ds.every(d => ymd(d) < cut)) break; }
       sc.scrollTop += sc.clientHeight * 0.8; await sleep(350);
       if (seen.size === last) stale++; else { stale = 0; last = seen.size; }
     }
     sc.scrollTop = 0;
-    const all = [...seen.values()];
-    const cut = ymd(cutoff());
+    const all = [...seen.values()].filter(r => !untilCutoff || (r.date && r.date >= cut));
+    if (!all.length && !untilCutoff) return status('Scan found no conversations. ' + listMissing);
     const fake = all.filter(r => r.why);
-    lastScan = { at: new Date().toISOString(), cutoff: cut, total: all.length, fake, real: all.filter(r => !r.why) };
+    lastScan = { at: new Date().toISOString(), cutoff: cut, partial: untilCutoff, total: all.length, fake, real: all.filter(r => !r.why) };
     const byReason = {}; fake.forEach(r => { byReason[r.why] = (byReason[r.why] || 0) + 1; });
     const deletable = fake.filter(r => r.date && r.date >= cut).length;
-    status(`${all.length} conversations scanned\n${fake.length} clearly fake (${deletable} ${since()})\n${all.length - fake.length} from real senders\n\n`
-      + Object.entries(byReason).map(([k, v]) => `${v}  ${k}`).join('\n'));
+    badge(deletable ? `${deletable} fake ${since()}` : `clean ${since()}`);
+    status(`${all.length} conversations ${untilCutoff ? since() : 'scanned'}\n${fake.length} clearly fake (${deletable} ${since()})\n${all.length - fake.length} from real senders\n\n`
+      + Object.entries(byReason).map(([k, v]) => `${v}  ${k}`).join('\n') + fewRowsTip());
     return lastScan;
   }
 
-  async function deleteFakes() {
-    const scanResult = lastScan || await scan();
-    const cut = cutoff();
-    const planned = scanResult.fake.filter(r => r.date && r.date >= ymd(cut)).length;
-    if (!planned) { GM_setValue('lastRun', scanResult.at); return status(`Nothing to delete ${since()}.`); }
-    if (!confirm(`Move ${planned} clearly fake conversations ${since()} to Deleted Items?`)) return;
+  // One top-to-cutoff pass. Returns how many were deleted, or a stop reason.
+  async function deletePass(cut) {
     const sc = scroller(); sc.scrollTop = 0; await sleep(800);
     const isTarget = o => { const r = rowInfo(o); return !!r.why && r.date && r.date >= cut; };
     let deleted = 0; let stuck = 0;
@@ -184,41 +288,106 @@ function init() {
       if (dates.length && dates.every(d => d < cut)) break;
       const targets = rows.filter(isTarget);
       if (!targets.length) {
-        const before = sc.scrollTop; sc.scrollTop += sc.clientHeight * 0.8; await sleep(700);
+        const before = sc.scrollTop; sc.scrollTop += sc.clientHeight * 0.8; await sleep(500);
         if (sc.scrollTop === before && ++stuck > 4) break; else if (sc.scrollTop !== before) stuck = 0;
         continue;
       }
-      for (const o of targets) { if (!isChecked(o)) { checkbox(o)?.click(); await sleep(80); } }
-      await sleep(300);
+      for (const o of targets) { if (!isChecked(o)) { checkbox(o)?.click(); await sleep(60); } }
+      await sleep(250);
       // Safety: never press Delete while a real sender's row is selected.
-      const selected = rowsNow().filter(o => isChecked(o) || o.getAttribute('aria-selected') === 'true');
-      const bad = selected.filter(o => !isTarget(o));
+      const bad = rowsNow().filter(o => isSelected(o) && !isTarget(o));
       if (bad.length) {
         bad.forEach(o => { if (isChecked(o)) checkbox(o).click(); });
         await sleep(300);
-        if (rowsNow().some(o => (isChecked(o) || o.getAttribute('aria-selected') === 'true') && !isTarget(o))) {
-          return status(`Stopped: a real sender was selected (${rowInfo(bad[0]).addr || rowInfo(bad[0]).name}). Nothing else deleted.`);
+        if (rowsNow().some(o => isSelected(o) && !isTarget(o))) {
+          return { deleted, stop: `Stopped: a real sender was selected (${rowInfo(bad[0]).addr || rowInfo(bad[0]).name}). Nothing else deleted.` };
         }
       }
-      const n = rowsNow().filter(isChecked).length;
-      if (!n) continue;
+      const picked = rowsNow().filter(isChecked);
+      if (!picked.length) continue;
       const btn = deleteButton();
-      if (!btn) return status('Stopped: could not find the Delete button.');
-      btn.click(); deleted += n;
-      status(`Deleting… ${deleted} of ~${planned}`);
-      await sleep(1800);
+      if (!btn) return { deleted, stop: 'Stopped: could not find the Delete button. Outlook may have changed its page (see CLAUDE.md).' };
+      btn.click(); deleted += picked.length;
+      status(`Deleting… ${deleted}`);
+      // Wait for Outlook to remove the rows instead of a fixed pause (max 6 s).
+      for (let i = 0; i < 60 && picked.some(o => o.isConnected && isChecked(o)); i++) await sleep(100);
+      await sleep(150);
+    }
+    return { deleted };
+  }
+
+  async function deleteFakes() {
+    const sc = scroller();
+    if (!sc) return status(listMissing);
+    const top = rowsNow().slice(0, 15).map(o => rowInfo(o).date);
+    if (!isNewestFirst(top)) return status('The list is not sorted by date, newest first. Change the sort and try again; the "since last run" cutoff depends on it.');
+    const scanResult = lastScan || await scan({ untilCutoff: true });
+    if (!scanResult) return;
+    const cut = cutoff();
+    const planned = scanResult.fake.filter(r => r.date && r.date >= ymd(cut)).length;
+    if (!planned) { status(`Nothing to delete ${since()}.`); GM_setValue('lastRun', scanResult.at); return badge(`clean ${since()}`); }
+    if (!confirm(`Move ${planned} clearly fake conversations ${since()} to Deleted Items?`)) return;
+    let total = 0;
+    // Extra passes catch rows the list skipped while re-rendering, and mail that arrived mid-run.
+    for (let pass = 0; pass < 3 && !stopRequested; pass++) {
+      const r = await deletePass(cut);
+      total += r.deleted;
+      if (r.stop) return status(`${r.stop}\nMoved ${total} conversations to Deleted Items before stopping.`);
+      if (!r.deleted) break;
     }
     // Only a completed run moves the cutoff forward; a stopped run is redone next time.
-    if (!stopRequested) GM_setValue('lastRun', scanResult.at);
+    if (!stopRequested) { GM_setValue('lastRun', scanResult.at); badge(`clean ${since()}`); }
     lastScan = null;
-    status(`${stopRequested ? 'Stopped' : 'Done'}: moved ${deleted} conversations to Deleted Items.`);
+    status(`${stopRequested ? 'Stopped' : 'Done'}: moved ${total} conversations to Deleted Items.${fewRowsTip()}`);
+  }
+
+  // Opens one message per real sender and collects its unsubscribe link (this marks it read).
+  async function collectUnsubscribe() {
+    // Needs every real sender, so a partial (since-last-run) scan is not enough.
+    const scanResult = lastScan && !lastScan.partial ? lastScan : await scan();
+    if (!scanResult) return;
+    const key = addr => { const d = addr.split('@')[1]; return SHARED_PROVIDERS.includes(d) ? addr : d; };
+    const counts = {};
+    scanResult.real.filter(r => r.addr).forEach(r => { counts[key(r.addr)] = (counts[key(r.addr)] || 0) + 1; });
+    const want = new Set(Object.keys(counts));
+    const found = new Map(unsubLinks.map(l => [l.sender, l]));
+    const re = /unsubscribe|opt[- ]?out|email.?preferences|manage.?(your )?(email|subscription|preferences|notifications)|stop receiving|desinscrever|cancelar.?subscri|darse de baja/i;
+    const sc = scroller(); sc.scrollTop = 0; await sleep(800);
+    let stale = 0;
+    while (!stopRequested && found.size < want.size && stale < 6) {
+      await waitVisible();
+      const row = rowsNow().find(o => { const r = rowInfo(o); return r.addr && want.has(key(r.addr)) && !found.has(key(r.addr)); });
+      if (!row) { const before = sc.scrollTop; sc.scrollTop += sc.clientHeight * 0.8; await sleep(400); stale = sc.scrollTop === before ? stale + 1 : 0; continue; }
+      const sender = key(rowInfo(row).addr);
+      row.click(); await sleep(2000);
+      // Links in Junk stay disabled until "Show blocked content" is clicked.
+      const show = [...document.querySelectorAll('button,[role="button"],a')].find(e => /Show blocked content/i.test(e.innerText || ''));
+      if (show) { show.click(); await sleep(1500); }
+      const body = document.querySelector('[aria-label="Message body"]');
+      const a = body && [...body.querySelectorAll('a')].find(x => re.test(`${x.innerText} ${x.href}`));
+      found.set(sender, { sender, count: counts[sender], href: a ? a.href : null });
+      status(`Collecting unsubscribe links… ${found.size} of ${want.size} senders`);
+    }
+    unsubLinks = [...found.values()].sort((x, y) => y.count - x.count);
+    renderUnsub();
+    status(`${unsubLinks.filter(l => l.href).length} senders with an unsubscribe link (${unsubLinks.length} checked). Click one to open it in a new tab.`);
+  }
+
+  function renderUnsub() {
+    list.replaceChildren(...unsubLinks.filter(l => l.href).map(l => {
+      const a = document.createElement('a');
+      a.href = l.href; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      a.textContent = `${l.sender} (${l.count})`;
+      a.style.display = 'block';
+      return a;
+    }));
   }
 
   function saveReport() {
     if (!lastScan) return status('Run Scan first.');
     const grouped = {};
     lastScan.real.forEach(r => { const d = r.addr.split('@')[1] || r.name; (grouped[d] ||= { count: 0, sample: r.subj }).count++; });
-    const report = { ...lastScan, realByDomain: Object.entries(grouped).sort((a, b) => b[1].count - a[1].count) };
+    const report = { ...lastScan, realByDomain: Object.entries(grouped).sort((a, b) => b[1].count - a[1].count), unsubscribe: unsubLinks };
     const a = document.createElement('a');
     a.href = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' }));
     a.download = `junk-report-${lastScan.at.slice(0, 10)}.json`;
@@ -228,23 +397,19 @@ function init() {
   function editRules() {
     const text = prompt('Your rules (JSON), added on top of the defaults. Clear the box to remove them.', GM_getValue('rules', '{}'));
     if (text === null) return;
-    try { GM_setValue('rules', text.trim() ? JSON.stringify(JSON.parse(text)) : '{}'); rules = load(); lastScan = null; status('Rules saved.'); }
+    try { GM_setValue('rules', text.trim() ? JSON.stringify(JSON.parse(text)) : '{}'); rules = load(); lastScan = null; decorate(); status('Rules saved.'); }
     catch { status('Not valid JSON; rules unchanged.'); }
   }
 
-  panel.addEventListener('click', async e => {
+  panel.addEventListener('click', e => {
     const a = e.target.dataset && e.target.dataset.a;
     if (!a) return;
     if (a === 'stop') { stopRequested = true; return; }
-    stopRequested = false;
-    try {
-      if (a === 'scan') await scan();
-      if (a === 'delete') await deleteFakes();
-      if (a === 'report') saveReport();
-      if (a === 'rules') editRules();
-    } catch (err) { status('Error: ' + err.message); }
+    if (a === 'report') return saveReport();
+    if (a === 'rules') return editRules();
+    run(() => (a === 'scan' ? scan() : a === 'delete' ? deleteFakes() : collectUnsubscribe()));
   });
 }
 
-if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, DEFAULT_RULES };
+if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, DEFAULT_RULES };
 else init();

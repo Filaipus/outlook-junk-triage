@@ -1,6 +1,6 @@
 // Run: node test.js — checks the classifier, date parsing and row parsing on sample Junk rows.
 const assert = require('assert');
-const { classify, parseDate, parseRowText, mergeRules, DEFAULT_RULES } = require('./junk-triage.user.js');
+const { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, DEFAULT_RULES } = require('./junk-triage.user.js');
 
 // Personal rules come from the Rules button and are added to the defaults.
 const R = mergeRules(DEFAULT_RULES, { fakeDomains: ['hacked-shop.example'], fakeAddresses: ['me@hotmail.example'] });
@@ -32,6 +32,23 @@ fake.forEach(([r, why]) => assert.strictEqual(classify(r, R), why, `${r.addr || 
 real.forEach(r => assert.strictEqual(classify(r, R), null, `should be real: ${r.addr}`));
 // Without personal lists, those senders fall through to "real" (reviewed by hand).
 assert.strictEqual(classify({ addr: 'x@hacked-shop.example', subj: 'Deal' }, DEFAULT_RULES), null);
+
+// Mark fake / mark real: whole domains for companies, single addresses on shared providers.
+let s = applyMark({}, 'promo@deals.example', 'fake');
+assert.deepStrictEqual(s.fakeDomains, ['deals.example']);
+s = applyMark(s, 'promo@deals.example', 'real');
+assert.deepStrictEqual([s.fakeDomains, s.realDomains], [[], ['deals.example']]);
+s = applyMark({}, 'spammer@gmail.com', 'fake');
+assert.deepStrictEqual([s.fakeAddresses, s.fakeDomains], [['spammer@gmail.com'], undefined]);
+assert.strictEqual(applyMark({}, '', 'fake'), null);
+// A friend on live.com stays real even though live.com is a default fake domain.
+const friend = mergeRules(DEFAULT_RULES, applyMark({}, 'friend@live.com', 'real'));
+assert.strictEqual(classify({ addr: 'friend@live.com', subj: 'Hi' }, friend), null);
+assert.strictEqual(classify({ addr: 'no-reply@live.com', subj: 'Lung trick' }, friend), 'known scam sender');
+
+// Sort check guarding the "since last run" cutoff.
+assert.ok(isNewestFirst([new Date(2026, 10, 16), null, new Date(2026, 10, 14), new Date(2026, 10, 14)]));
+assert.ok(!isNewestFirst([new Date(2026, 10, 14), new Date(2026, 10, 16)]));
 
 const now = new Date(2026, 10, 16, 12);
 assert.strictEqual(parseDate(['10:16'], now).getDate(), 16);

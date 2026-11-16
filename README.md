@@ -19,16 +19,35 @@ Sync** (OneDrive, Dropbox, Google Drive or WebDAV) with the same account on each
 
 ## Use
 
+When you open Junk, the script scans the mail received since the last run and shows the result
+in the panel title, for example "Junk Triage — 23 fake since Mon Nov 16".
+
+In the message list:
+
+- Clearly fake conversations are tinted red, with the reason next to them.
+- Hover a row for **✗ fake** and **✓ real** buttons. One click adds that sender to your rules
+  (the whole domain for companies, just the address on gmail, hotmail and other shared
+  providers) and re-sorts the list.
+
 | Button | What it does |
 |---|---|
 | **Scan** | Scrolls the whole Junk folder and shows counts: fake (and how many arrived since the last run), real senders, and why each fake was flagged. Changes nothing. |
-| **Delete fakes** | Asks for confirmation, then moves the clearly fake conversations received since the last run to Deleted Items, in batches. |
-| **Save report** | Downloads the last scan as JSON: every fake with its reason, and real senders grouped by domain so you can decide what to trust. |
-| **Rules** | Edit your rules as JSON (see below). Clear the box to reset to defaults. |
-| **Stop** | Stops a scan or deletion after the current batch. |
+| **Delete fakes** | Asks for confirmation, then moves the clearly fake conversations received since the last run to Deleted Items. It makes extra passes to catch rows it skipped or mail that arrived mid-run. |
+| **Unsubscribe links** | Opens one message from each real sender, collects its unsubscribe link, and lists the senders as links you can click through. Opening a message marks it read. |
+| **Save report** | Downloads the last scan as JSON: every fake with its reason, real senders grouped by domain, and any unsubscribe links collected. |
+| **Rules** | Edit your rules as JSON (see below). Clear the box to remove your rules. |
+| **Stop** | Stops a scan, deletion or link collection after the current step. |
 
 Keep the Outlook tab in front while it runs: Outlook stops drawing the message list in
-background tabs, so the script pauses until the tab is visible again.
+background tabs, so the script pauses until the tab is visible again. For faster deletes, set
+Outlook's **View → Layout → Reading pane** to **Hide** and **Density** to **Compact**: more
+rows on screen means more deleted per click.
+
+If Outlook isn't sorting Junk newest first, **Delete fakes** refuses to run, because the "since
+last run" cutoff depends on that order. If the script can't find the message list or the
+Delete button, it says so instead of doing nothing.
+
+To turn off the automatic scan, add `"autoScan": false` to your rules.
 
 ## What counts as clearly fake
 
@@ -58,8 +77,10 @@ your own on top of them, for example:
 - `fakeDomains`: scam or hacked domains the heuristics miss.
 - `fakeAddresses`: single scam addresses on shared providers such as gmail.com. If scammers
   spoof your own address, add it here; it stays in your browser and out of this repo.
-- `realDomains`: real companies the heuristics wrongly flag. This wins over every other rule,
-  so it also rescues a sender from the default fake lists.
+- `realDomains` and `realAddresses`: real companies or people the heuristics wrongly flag.
+  These win over every other rule, so they also rescue a sender from the default fake lists.
+
+The row buttons edit these same lists for you.
 
 Your rules are added to the defaults and stored in Violentmonkey, not in the script, so script
 updates never overwrite them. Keep a copy in a local `my-rules.json` (git-ignored) if you want
