@@ -64,8 +64,11 @@ Commit as the repo-local identity `Filaipus <6901771+Filaipus@users.noreply.gith
   not added to it). Outlook shows no selection count anywhere readable (the only "selected"
   text is the folder pane), so the delete guard compares ticked rows on screen with the batch's
   targets and never scrolls while anything is ticked.
-- **Re-renders after clicks**: clicking a checkbox can re-render the list, so row indices shift.
-  Always re-query rows after a click; never reuse an index or element from before it.
+- **Re-renders after clicks**: clicking a checkbox re-renders the list, so row indices shift and
+  element references go stale (clicking a stale element does nothing). Always re-query rows
+  before each click and compare against the targets on screen now. Ticking a batch from a list
+  captured beforehand left rows unticked and stopped every v0.5.0 delete run with
+  "N rows were selected but M were expected".
 - **View ribbon menus** (used by Fix layout): tabs are `[role="tab"]` named Home / View / Help.
   Ribbon buttons are found by `aria-label` (Density, Messages, Layout), because their text also
   contains a hover description. Options are `[role="menuitemcheckbox"]` inside `[role="menu"]`
