@@ -1,12 +1,25 @@
 // Run: node test.js — checks the classifier, date parsing and row parsing on sample Junk rows.
 const assert = require('assert');
-const { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, DEFAULT_RULES } = require('./junk-triage.user.js');
+const { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, DEFAULT_RULES } = require('./junk-triage.user.js');
 
 // Personal rules come from the Rules button and are added to the defaults.
 const R = mergeRules(DEFAULT_RULES, { fakeDomains: ['hacked-shop.example'], fakeAddresses: ['me@hotmail.example'] });
 assert.ok(R.fakeDomains.includes('uqtvivu.com') && R.fakeDomains.includes('hacked-shop.example'), 'lists are combined');
 assert.ok(R.fakeAddresses.length === DEFAULT_RULES.fakeAddresses.length + 1);
 assert.deepStrictEqual(mergeRules(DEFAULT_RULES, {}), DEFAULT_RULES);
+// A value typed without [ ] adds to the list instead of replacing the defaults.
+const typo = mergeRules(DEFAULT_RULES, { fakeDomains: 'gmx-spam.example' });
+assert.ok(typo.fakeDomains.includes('uqtvivu.com') && typo.fakeDomains.includes('gmx-spam.example'));
+assert.strictEqual(classify({ addr: 'x@mx.com', subj: 'Hi' }, typo), null, 'no partial-text matches');
+assert.strictEqual(mergeRules(DEFAULT_RULES, { autoScan: false }).autoScan, false);
+
+// Delete targets: fake AND dated on/after the cutoff day; no date means never.
+const cutDay = new Date(2026, 10, 10);
+assert.ok(isDeleteTarget({ why: 'random domain', date: new Date(2026, 10, 10) }, cutDay), 'cutoff day itself');
+assert.ok(isDeleteTarget({ why: 'random domain', date: new Date(2026, 10, 12) }, cutDay));
+assert.ok(!isDeleteTarget({ why: 'random domain', date: new Date(2026, 10, 9, 23, 59) }, cutDay), 'day before');
+assert.ok(!isDeleteTarget({ why: 'random domain', date: null }, cutDay), 'no date');
+assert.ok(!isDeleteTarget({ why: null, date: new Date(2026, 10, 12) }, cutDay), 'real sender');
 
 const fake = [
   [{ name: '✅Healthcare.com', addr: '', subj: 'Medicare' }, 'no sender address'],
@@ -41,6 +54,11 @@ assert.deepStrictEqual([s.fakeDomains, s.realDomains], [[], ['deals.example']]);
 s = applyMark({}, 'spammer@gmail.com', 'fake');
 assert.deepStrictEqual([s.fakeAddresses, s.fakeDomains], [['spammer@gmail.com'], undefined]);
 assert.strictEqual(applyMark({}, '', 'fake'), null);
+// Free providers ban one address, never the whole provider.
+for (const a of ['spam@gmx.com', 'spam@mail.com', 'spam@sapo.pt', 'spam@hotmail.co.uk']) {
+  const m = applyMark({}, a, 'fake');
+  assert.deepStrictEqual([m.fakeAddresses, m.fakeDomains], [[a], undefined], a);
+}
 // A friend on live.com stays real even though live.com is a default fake domain.
 const friend = mergeRules(DEFAULT_RULES, applyMark({}, 'friend@live.com', 'real'));
 assert.strictEqual(classify({ addr: 'friend@live.com', subj: 'Hi' }, friend), null);

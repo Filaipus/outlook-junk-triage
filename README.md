@@ -20,7 +20,10 @@ Sync** (OneDrive, Dropbox, Google Drive or WebDAV) with the same account on each
 ## Use
 
 When you open Junk, the script scans the mail received since the last run and shows the result
-in the panel title, for example "Junk Triage — 23 fake since Mon Nov 16".
+in the panel title, for example "Junk Triage — 23 fake since Mon Nov 16". Scrolling the list
+yourself stops that scan and leaves the list where you put it. On the very first run there is
+no last run yet, so press **Scan** yourself; it reads the whole folder, which takes about a
+minute.
 
 In the message list:
 
@@ -89,8 +92,11 @@ a backup.
 ## Safety
 
 - Deleted conversations go to **Deleted Items** and can be restored from there.
-- Before every Delete click the script re-checks every selected row. If a real sender is
-  selected, it stops without deleting anything.
+- Before every Delete click the script re-checks every selected row, and the number of ticked
+  rows must equal the number of fakes it picked. If a real sender is selected or the numbers
+  differ, it stops without deleting anything.
+- The "last run" date only moves forward when the final pass found nothing left to delete, so
+  leftovers are picked up next time.
 - Only conversations dated on or after the day of the last completed run are touched. The
   first run covers the whole folder (Outlook keeps Junk for 30 days). A run you stop, or one
   that halts on a safety check, does not move the date forward. To force a whole-folder sweep,
