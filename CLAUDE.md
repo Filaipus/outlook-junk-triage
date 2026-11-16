@@ -66,6 +66,15 @@ Commit as the repo-local identity `Filaipus <6901771+Filaipus@users.noreply.gith
   targets and never scrolls while anything is ticked.
 - **Re-renders after clicks**: clicking a checkbox can re-render the list, so row indices shift.
   Always re-query rows after a click; never reuse an index or element from before it.
+- **View ribbon menus** (used by Fix layout): tabs are `[role="tab"]` named Home / View / Help.
+  Ribbon buttons are found by `aria-label` (Density, Messages, Layout), because their text also
+  contains a hover description. Options are `[role="menuitemcheckbox"]` inside `[role="menu"]`
+  and fade in, so poll for them; closed menus stay in the page, so filter with
+  `checkVisibility()` (menus are fixed-position, where `offsetParent` is always null). The
+  selected option's text starts with a checkmark glyph, so compare letters only. There is no
+  "Hide" reading pane anymore: the options are Show on the right / on the bottom / Fill screen /
+  Popout only. Rows on screen depend on the window height, density and message preview, not on
+  where the reading pane is. The Delete button only exists on the Home ribbon.
 - **No zoom tricks**: setting `body.style.zoom` shows more rows but breaks scrolling.
 - **Row buttons** label themselves with CSS `::after`, so their text never leaks into
   `innerText` (which the parser reads). Clicks on them are swallowed in the capture phase so

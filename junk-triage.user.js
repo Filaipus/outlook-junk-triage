@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Outlook Junk Triage
 // @namespace   outlook-junk-triage
-// @version     0.4.1
+// @version     0.5.0
 // @description Flag clearly fake senders in the Outlook.com Junk folder, mark senders fake or real in one click, delete fakes received since the last run, and collect unsubscribe links.
 // @homepageURL https://github.com/Filaipus/outlook-junk-triage
 // @updateURL   https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
@@ -16,6 +16,9 @@
 const DEFAULT_RULES = {
   // Scan automatically (since the last run) whenever the Junk folder opens.
   autoScan: true,
+  // What the Fix layout button sets, using the option names in Outlook's View menus. Compact rows
+  // with no preview line fit the most conversations on screen, so each Delete click removes more.
+  layout: { density: 'Compact', preview: 'Off', readingPane: 'Show on the right' },
   // Throwaway TLDs that real senders rarely use.
   spamTlds: ['sbs', 'online', 'space', 'shop', 'website', 'surf', 'beer', 'top', 'xyz', 'icu', 'click', 'cfd',
     'lol', 'buzz', 'site', 'store', 'la', 'cl', 'np', 'mx'],
@@ -134,6 +137,12 @@ function isDeleteTarget(info, cut) {
   return !!info.why && !!info.date && info.date >= cut;
 }
 
+// Menu paths in Outlook's View ribbon for each layout setting: ribbon button, submenus, option.
+function layoutSteps(layout) {
+  const paths = { density: ['Density'], preview: ['Messages', 'Message preview'], readingPane: ['Layout', 'Reading pane'] };
+  return Object.entries(layout || {}).filter(([k, v]) => paths[k] && v).map(([k, v]) => [...paths[k], v]);
+}
+
 // True when dates (newest first, nulls skipped) never go up: the list is sorted newest first.
 function isNewestFirst(dates) {
   const d = dates.filter(Boolean);
@@ -171,7 +180,10 @@ function init() {
   // Outlook stops rendering the list in background tabs, so pause until the tab is visible again.
   const waitVisible = async () => { while (document.visibilityState !== 'visible') { status('Paused: bring this tab to the front'); await sleep(1000); } };
   const fewRowsTip = () => (rowsNow().length && rowsNow().length < 10
-    ? '\n\nTip: View → Layout → Reading pane: Hide, and Density: Compact, fit more rows per batch.' : '');
+    ? (GM_getValue('layoutFixed', '')
+      ? '\n\nTip: maximize the Outlook window to fit more rows per batch.'
+      : '\n\nTip: press Fix layout to fit more rows per batch.')
+    : '');
   const listMissing = 'Could not find the message list. Open the Junk Email folder; if it is open, Outlook changed its page (see CLAUDE.md).';
 
   // --- styles (row tint + row buttons) ---
@@ -191,7 +203,7 @@ function init() {
   // Outlook enforces Trusted Types, so build the panel with DOM calls instead of innerHTML.
   const title = document.createElement('b'); title.textContent = 'Junk Triage';
   const bar = document.createElement('div'); bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:8px 0';
-  [['scan', 'Scan'], ['delete', 'Delete fakes'], ['unsub', 'Unsubscribe links'], ['report', 'Save report'], ['rules', 'Rules'], ['stop', 'Stop']]
+  [['scan', 'Scan'], ['delete', 'Delete fakes'], ['unsub', 'Unsubscribe links'], ['layout', 'Fix layout'], ['report', 'Save report'], ['rules', 'Rules'], ['stop', 'Stop']]
     .forEach(([a, label]) => { const b = document.createElement('button'); b.dataset.a = a; b.textContent = label; bar.appendChild(b); });
   const statusLine = document.createElement('div'); statusLine.style.whiteSpace = 'pre-wrap';
   const list = document.createElement('div'); list.style.cssText = 'max-height:220px;overflow:auto;margin-top:6px';
@@ -434,15 +446,57 @@ function init() {
     catch { status('Not valid JSON; rules unchanged.'); }
   }
 
+  // Sets the layout from rules.layout by clicking through Outlook's View menus, then returns to
+  // the Home ribbon (the Delete button only exists there).
+  async function fixLayout() {
+    const steps = layoutSteps(rules.layout);
+    const describe = s => `${s.slice(0, -1).join(' → ')}: ${s[s.length - 1]}`;
+    if (!confirm(`Change Outlook's layout?\n\n${steps.map(describe).join('\n')}\n\nYou can change these back under View.`)) return;
+    const norm = e => (e.innerText || e.getAttribute('aria-label') || '').trim().replace(/\s+/g, ' ');
+    const tab = label => [...document.querySelectorAll('[role="tab"]')].find(t => norm(t) === label);
+    // Ribbon buttons' text includes their hover description, so match the aria-label.
+    const ribbonButton = label => [...document.querySelectorAll('button')].find(b => b.getAttribute('aria-label') === label);
+    // Closed menus can stay in the page, so only look at visible ones. Menus float (fixed
+    // position), where offsetParent is always null, so ask the browser instead.
+    const shown = e => (e.checkVisibility ? e.checkVisibility({ checkOpacity: true, checkVisibilityCSS: true }) : e.getClientRects().length > 0);
+    // The selected option starts with a checkmark glyph from Outlook's icon font, so compare
+    // letters, digits and spaces only.
+    const plain = s => s.replace(/[^\p{L}\p{N} ]/gu, '').trim().toLowerCase();
+    const findItem = label => [...document.querySelectorAll('[role="menu"] [role^="menuitem"]')]
+      .filter(shown).find(e => plain(norm(e)) === plain(label));
+    // Menus fade in, so wait (up to 3 s) until the option is actually visible.
+    const menuItem = async label => { for (let i = 0; i < 30; i++) { const m = findItem(label); if (m) return m; await sleep(100); } return null; };
+    tab('View')?.click(); await sleep(800);
+    const changed = []; const failed = [];
+    for (const s of steps) {
+      const btn = ribbonButton(s[0]);
+      if (!btn) { failed.push(describe(s)); continue; }
+      btn.click();
+      let ok = true;
+      for (const sub of s.slice(1, -1)) { const m = await menuItem(sub); if (!m) { ok = false; break; } m.click(); }
+      const item = ok && await menuItem(s[s.length - 1]);
+      if (!item) failed.push(describe(s));
+      else if (item.getAttribute('aria-checked') !== 'true') { item.click(); changed.push(describe(s)); }
+      await sleep(700);
+      // Close any menu still open (already-selected options leave it open).
+      if ([...document.querySelectorAll('[role="menu"]')].some(shown)) { btn.click(); await sleep(400); }
+    }
+    tab('Home')?.click(); await sleep(500);
+    if (!failed.length) GM_setValue('layoutFixed', new Date().toISOString());
+    status((changed.length ? `Changed: ${changed.join(', ')}.` : 'Layout already set.')
+      + (failed.length ? `\nCould not find: ${failed.join(', ')}. Outlook's menus may have changed (see CLAUDE.md).` : '')
+      + `\n${rowsNow().length} rows fit on screen now.`);
+  }
+
   panel.addEventListener('click', e => {
     const a = e.target.dataset && e.target.dataset.a;
     if (!a) return;
     if (a === 'stop') { stopRequested = true; return; }
     if (a === 'report') return saveReport();
     if (a === 'rules') return editRules();
-    run(() => (a === 'scan' ? scan() : a === 'delete' ? deleteFakes() : collectUnsubscribe()));
+    run(() => (a === 'scan' ? scan() : a === 'delete' ? deleteFakes() : a === 'layout' ? fixLayout() : collectUnsubscribe()));
   });
 }
 
-if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, DEFAULT_RULES };
+if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, layoutSteps, DEFAULT_RULES };
 else init();

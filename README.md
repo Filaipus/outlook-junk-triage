@@ -36,15 +36,22 @@ In the message list:
 |---|---|
 | **Scan** | Scrolls the whole Junk folder and shows counts: fake (and how many arrived since the last run), real senders, and why each fake was flagged. Changes nothing. |
 | **Delete fakes** | Asks for confirmation, then moves the clearly fake conversations received since the last run to Deleted Items. It makes extra passes to catch rows it skipped or mail that arrived mid-run. |
+| **Fix layout** | Sets Outlook's View options so the most conversations fit on screen (see below). |
 | **Unsubscribe links** | Opens one message from each real sender, collects its unsubscribe link, and lists the senders as links you can click through. Opening a message marks it read. |
 | **Save report** | Downloads the last scan as JSON: every fake with its reason, real senders grouped by domain, and any unsubscribe links collected. |
 | **Rules** | Edit your rules as JSON (see below). Clear the box to remove your rules. |
 | **Stop** | Stops a scan, deletion or link collection after the current step. |
 
 Keep the Outlook tab in front while it runs: Outlook stops drawing the message list in
-background tabs, so the script pauses until the tab is visible again. For faster deletes, set
-Outlook's **View → Layout → Reading pane** to **Hide** and **Density** to **Compact**: more
-rows on screen means more deleted per click.
+background tabs, so the script pauses until the tab is visible again.
+
+**Fix layout** sets Outlook's View options so more conversations fit on screen, which means
+more deleted per click: Density **Compact**, Message preview **Off** (no preview line under the
+subject), and the reading pane **on the right**. It asks first, lists what it will change, and
+returns to the Home ribbon. Change any of it back under **View**, or set your own in Rules, for
+example `"layout": { "density": "Compact", "preview": "1 Line", "readingPane": "Show on the right" }`
+(use the option names exactly as Outlook's View menus show them). After that, a bigger Outlook
+window is the only way to fit more rows.
 
 If Outlook isn't sorting Junk newest first, **Delete fakes** refuses to run, because the "since
 last run" cutoff depends on that order. If the script can't find the message list or the
