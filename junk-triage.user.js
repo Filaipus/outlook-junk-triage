@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Outlook Junk Triage
 // @namespace   outlook-junk-triage
-// @version     0.5.0
+// @version     0.5.1
 // @description Flag clearly fake senders in the Outlook.com Junk folder, mark senders fake or real in one click, delete fakes received since the last run, and collect unsubscribe links.
 // @homepageURL https://github.com/Filaipus/outlook-junk-triage
 // @updateURL   https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
@@ -316,7 +316,12 @@ function init() {
   async function deletePass(cut) {
     const sc = scroller(); sc.scrollTop = 0; await sleep(800);
     const isTarget = o => isDeleteTarget(rowInfo(o), cut);
-    let deleted = 0; let stuck = 0;
+    let deleted = 0; let stuck = 0; let mismatches = 0;
+    // Untick one row at a time, re-querying after each click (rows re-render).
+    const untickAll = async () => {
+      for (let i = 0; i < 40; i++) { const o = rowsNow().find(isChecked); if (!o) break; checkbox(o).click(); await sleep(80); }
+      await sleep(200);
+    };
     while (!stopRequested) {
       await waitVisible();
       const rows = rowsNow();
@@ -325,30 +330,40 @@ function init() {
       const targets = rows.filter(isTarget);
       if (!targets.length) {
         // Never scroll with rows still ticked: off screen they could no longer be checked.
-        rows.filter(isChecked).forEach(o => checkbox(o).click());
+        await untickAll();
         const before = sc.scrollTop; sc.scrollTop += sc.clientHeight * 0.8; await sleep(500);
         if (sc.scrollTop === before && ++stuck > 4) break; else if (sc.scrollTop !== before) stuck = 0;
         continue;
       }
-      for (const o of targets) { if (!isChecked(o)) { checkbox(o)?.click(); await sleep(60); } }
+      // Each checkbox click re-renders the list, so re-query before every click instead of
+      // reusing row elements (they go stale and clicking them does nothing).
+      for (let i = 0; i < 40; i++) {
+        const next = rowsNow().find(o => isTarget(o) && !isChecked(o));
+        if (!next) break;
+        checkbox(next)?.click(); await sleep(80);
+      }
       await sleep(250);
       // Safety: never press Delete while a real sender's row is selected.
       const bad = rowsNow().filter(o => isSelected(o) && !isTarget(o));
       if (bad.length) {
-        bad.forEach(o => { if (isChecked(o)) checkbox(o).click(); });
-        await sleep(300);
+        await untickAll(); mismatches++;
         if (rowsNow().some(o => isSelected(o) && !isTarget(o))) {
           return { deleted, stop: `Stopped: a real sender was selected (${rowInfo(bad[0]).addr || rowInfo(bad[0]).name}). Nothing else deleted.` };
         }
+        continue;
       }
       const picked = rowsNow().filter(isChecked);
       if (!picked.length) continue;
       // Outlook can't report its selection count, and rows off screen can't be checked. So the
-      // ticked rows on screen must be exactly this batch's targets, or nothing is deleted.
-      if (picked.length !== targets.length) {
-        picked.forEach(o => checkbox(o).click());
-        return { deleted, stop: `Stopped: ${picked.length} rows were selected but ${targets.length} were expected. Nothing else deleted.` };
+      // ticked rows on screen must be exactly the targets on screen now, or nothing is deleted.
+      const want = rowsNow().filter(isTarget).length;
+      if (picked.length !== want) {
+        await untickAll();
+        // A re-render mid-batch can still cause this; retry the batch before giving up.
+        if (++mismatches <= 3) continue;
+        return { deleted, stop: `Stopped: ${picked.length} rows were selected but ${want} were expected, ${mismatches} times in a row. Nothing else deleted.` };
       }
+      mismatches = 0;
       const btn = deleteButton();
       if (!btn) return { deleted, stop: 'Stopped: could not find the Delete button. Outlook may have changed its page (see CLAUDE.md).' };
       btn.click(); deleted += picked.length;
