@@ -1,6 +1,15 @@
 // Run: node test.js — checks the classifier, date parsing and row parsing on sample Junk rows.
 const assert = require('assert');
-const { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, DEFAULT_RULES } = require('./junk-triage.user.js');
+const { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, layoutSteps, DEFAULT_RULES } = require('./junk-triage.user.js');
+
+// Fix layout: each setting maps to its path in Outlook's View ribbon; unknown or empty ones are skipped.
+assert.deepStrictEqual(layoutSteps(DEFAULT_RULES.layout), [
+  ['Density', 'Compact'], ['Messages', 'Message preview', 'Off'], ['Layout', 'Reading pane', 'Show on the right'],
+]);
+assert.deepStrictEqual(layoutSteps({ density: 'Cozy', preview: '', bogus: 'x' }), [['Density', 'Cozy']]);
+assert.deepStrictEqual(layoutSteps(undefined), []);
+// Your own layout replaces the default one as a whole (it is not a list).
+assert.deepStrictEqual(mergeRules(DEFAULT_RULES, { layout: { density: 'Cozy' } }).layout, { density: 'Cozy' });
 
 // Personal rules come from the Rules button and are added to the defaults.
 const R = mergeRules(DEFAULT_RULES, { fakeDomains: ['hacked-shop.example'], fakeAddresses: ['me@hotmail.example'] });
