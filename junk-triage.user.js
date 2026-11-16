@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Outlook Junk Triage
 // @namespace   outlook-junk-triage
-// @version     0.4.0
+// @version     0.4.1
 // @description Flag clearly fake senders in the Outlook.com Junk folder, mark senders fake or real in one click, delete fakes received since the last run, and collect unsubscribe links.
 // @homepageURL https://github.com/Filaipus/outlook-junk-triage
 // @updateURL   https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
@@ -45,14 +45,17 @@ const DEFAULT_RULES = {
 };
 
 // Shared mail providers: mark single addresses there, never the whole domain.
-const SHARED_PROVIDERS = ['gmail.com', 'googlemail.com', 'hotmail.com', 'outlook.com', 'live.com', 'msn.com',
-  'yahoo.com', 'icloud.com', 'me.com', 'aol.com', 'proton.me', 'protonmail.com'];
+const SHARED_PROVIDERS = ['gmail.com', 'googlemail.com', 'hotmail.com', 'hotmail.co.uk', 'hotmail.fr', 'outlook.com',
+  'outlook.pt', 'live.com', 'live.co.uk', 'msn.com', 'yahoo.com', 'yahoo.co.uk', 'ymail.com', 'icloud.com', 'me.com',
+  'aol.com', 'proton.me', 'protonmail.com', 'gmx.com', 'gmx.net', 'gmx.de', 'mail.com', 'zoho.com', 'yandex.com',
+  'sapo.pt'];
 
 // Your Rules are added to the defaults (lists are combined), so updates to the defaults still reach you.
 function mergeRules(defaults, stored) {
   const out = { ...defaults };
   for (const [k, v] of Object.entries(stored || {})) {
-    out[k] = Array.isArray(v) && Array.isArray(defaults[k]) ? [...new Set([...defaults[k], ...v])] : v;
+    // A single value typed without [ ] still adds to the list instead of replacing it.
+    out[k] = Array.isArray(defaults[k]) ? [...new Set([...defaults[k], ...[].concat(v)])] : v;
   }
   return out;
 }
@@ -125,6 +128,12 @@ function parseRowText(text) {
   };
 }
 
+// The one rule for what Delete removes: clearly fake, and dated on or after the cutoff day.
+// Rows with no readable date are never deleted.
+function isDeleteTarget(info, cut) {
+  return !!info.why && !!info.date && info.date >= cut;
+}
+
 // True when dates (newest first, nulls skipped) never go up: the list is sorted newest first.
 function isNewestFirst(dates) {
   const d = dates.filter(Boolean);
@@ -140,6 +149,7 @@ function init() {
   let busy = false;
   let lastScan = null;
   let autoScanned = false;
+  let autoRunning = false;
   let unsubLinks = [];
 
   const onJunk = () => location.pathname.includes('/junkemail');
@@ -235,9 +245,17 @@ function init() {
     decorate();
     if (rules.autoScan && !autoScanned && !busy && document.visibilityState === 'visible' && rowsNow().length) {
       autoScanned = true;
-      run(() => scan({ untilCutoff: true }));
+      // A first run would scroll the whole folder (about a minute), so leave that to the Scan button.
+      if (!GM_getValue('lastRun', '')) return badge('first run: press Scan');
+      autoRunning = true;
+      run(() => scan({ untilCutoff: true })).finally(() => { autoRunning = false; });
     }
   }, 700);
+
+  // The automatic scan scrolls the list; give it back the moment you scroll it yourself.
+  for (const type of ['wheel', 'touchmove', 'keydown']) {
+    window.addEventListener(type, e => { if (autoRunning && e.isTrusted) stopRequested = true; }, true);
+  }
 
   async function run(task) {
     if (busy) return status('Busy — press Stop first.');
@@ -249,7 +267,8 @@ function init() {
   async function scan({ untilCutoff = false } = {}) {
     const sc = scroller();
     if (!sc) return status(listMissing);
-    const cut = ymd(cutoff());
+    const cutDate = cutoff();
+    const cut = ymd(cutDate);
     sc.scrollTop = 0; await sleep(800);
     const seen = new Map(); let stale = 0; let last = -1;
     while (stale < 10 && !stopRequested) {
@@ -257,19 +276,24 @@ function init() {
       const rows = rowsNow();
       for (const o of rows) {
         const id = rowId(o);
-        if (!seen.has(id)) { const r = rowInfo(o); seen.set(id, { name: r.name, addr: r.addr, subj: r.subj, date: r.date && ymd(r.date), why: r.why }); }
+        if (!seen.has(id)) {
+          const r = rowInfo(o);
+          seen.set(id, { name: r.name, addr: r.addr, subj: r.subj, date: r.date && ymd(r.date), why: r.why, target: isDeleteTarget(r, cutDate) });
+        }
       }
-      if (untilCutoff) { const ds = rows.map(o => rowInfo(o).date).filter(Boolean); if (ds.length && ds.every(d => ymd(d) < cut)) break; }
+      if (untilCutoff) { const ds = rows.map(o => rowInfo(o).date).filter(Boolean); if (ds.length && ds.every(d => d < cutDate)) break; }
       sc.scrollTop += sc.clientHeight * 0.8; await sleep(350);
       if (seen.size === last) stale++; else { stale = 0; last = seen.size; }
     }
+    // A stopped scan is incomplete: keep no result and leave the list where you scrolled it.
+    if (stopRequested) { badge(''); return status('Scan stopped.'); }
     sc.scrollTop = 0;
     const all = [...seen.values()].filter(r => !untilCutoff || (r.date && r.date >= cut));
     if (!all.length && !untilCutoff) return status('Scan found no conversations. ' + listMissing);
     const fake = all.filter(r => r.why);
     lastScan = { at: new Date().toISOString(), cutoff: cut, partial: untilCutoff, total: all.length, fake, real: all.filter(r => !r.why) };
     const byReason = {}; fake.forEach(r => { byReason[r.why] = (byReason[r.why] || 0) + 1; });
-    const deletable = fake.filter(r => r.date && r.date >= cut).length;
+    const deletable = fake.filter(r => r.target).length;
     badge(deletable ? `${deletable} fake ${since()}` : `clean ${since()}`);
     status(`${all.length} conversations ${untilCutoff ? since() : 'scanned'}\n${fake.length} clearly fake (${deletable} ${since()})\n${all.length - fake.length} from real senders\n\n`
       + Object.entries(byReason).map(([k, v]) => `${v}  ${k}`).join('\n') + fewRowsTip());
@@ -279,7 +303,7 @@ function init() {
   // One top-to-cutoff pass. Returns how many were deleted, or a stop reason.
   async function deletePass(cut) {
     const sc = scroller(); sc.scrollTop = 0; await sleep(800);
-    const isTarget = o => { const r = rowInfo(o); return !!r.why && r.date && r.date >= cut; };
+    const isTarget = o => isDeleteTarget(rowInfo(o), cut);
     let deleted = 0; let stuck = 0;
     while (!stopRequested) {
       await waitVisible();
@@ -288,6 +312,8 @@ function init() {
       if (dates.length && dates.every(d => d < cut)) break;
       const targets = rows.filter(isTarget);
       if (!targets.length) {
+        // Never scroll with rows still ticked: off screen they could no longer be checked.
+        rows.filter(isChecked).forEach(o => checkbox(o).click());
         const before = sc.scrollTop; sc.scrollTop += sc.clientHeight * 0.8; await sleep(500);
         if (sc.scrollTop === before && ++stuck > 4) break; else if (sc.scrollTop !== before) stuck = 0;
         continue;
@@ -305,6 +331,12 @@ function init() {
       }
       const picked = rowsNow().filter(isChecked);
       if (!picked.length) continue;
+      // Outlook can't report its selection count, and rows off screen can't be checked. So the
+      // ticked rows on screen must be exactly this batch's targets, or nothing is deleted.
+      if (picked.length !== targets.length) {
+        picked.forEach(o => checkbox(o).click());
+        return { deleted, stop: `Stopped: ${picked.length} rows were selected but ${targets.length} were expected. Nothing else deleted.` };
+      }
       const btn = deleteButton();
       if (!btn) return { deleted, stop: 'Stopped: could not find the Delete button. Outlook may have changed its page (see CLAUDE.md).' };
       btn.click(); deleted += picked.length;
@@ -324,21 +356,22 @@ function init() {
     const scanResult = lastScan || await scan({ untilCutoff: true });
     if (!scanResult) return;
     const cut = cutoff();
-    const planned = scanResult.fake.filter(r => r.date && r.date >= ymd(cut)).length;
+    const planned = scanResult.fake.filter(r => r.target).length;
     if (!planned) { status(`Nothing to delete ${since()}.`); GM_setValue('lastRun', scanResult.at); return badge(`clean ${since()}`); }
     if (!confirm(`Move ${planned} clearly fake conversations ${since()} to Deleted Items?`)) return;
-    let total = 0;
+    let total = 0; let clean = false;
     // Extra passes catch rows the list skipped while re-rendering, and mail that arrived mid-run.
     for (let pass = 0; pass < 3 && !stopRequested; pass++) {
       const r = await deletePass(cut);
       total += r.deleted;
       if (r.stop) return status(`${r.stop}\nMoved ${total} conversations to Deleted Items before stopping.`);
-      if (!r.deleted) break;
+      if (!r.deleted) { clean = true; break; }
     }
-    // Only a completed run moves the cutoff forward; a stopped run is redone next time.
-    if (!stopRequested) { GM_setValue('lastRun', scanResult.at); badge(`clean ${since()}`); }
     lastScan = null;
-    status(`${stopRequested ? 'Stopped' : 'Done'}: moved ${total} conversations to Deleted Items.${fewRowsTip()}`);
+    // Only a run whose last pass found nothing moves the cutoff forward, so leftovers are redone next time.
+    if (clean && !stopRequested) { GM_setValue('lastRun', scanResult.at); badge(`clean ${since()}`); }
+    const leftover = !clean && !stopRequested ? '\nSome fakes may remain; run Delete fakes again.' : '';
+    status(`${stopRequested ? 'Stopped' : 'Done'}: moved ${total} conversations to Deleted Items.${leftover}${fewRowsTip()}`);
   }
 
   // Opens one message per real sender and collects its unsubscribe link (this marks it read).
@@ -411,5 +444,5 @@ function init() {
   });
 }
 
-if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, DEFAULT_RULES };
+if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, DEFAULT_RULES };
 else init();

@@ -37,9 +37,12 @@ Commit as the repo-local identity `Filaipus <6901771+Filaipus@users.noreply.gith
 - **Since last run**: `GM_getValue('lastRun')` holds the time of the last completed delete (or
   an empty one). The cutoff is the start of that day; no value means the whole folder. A run
   that is stopped or hits a safety stop does not advance it.
-- **Delete** selects target rows by their checkboxes, re-checks that every selected row is a
-  target, clicks the toolbar Delete, and waits for the rows to disappear. Up to 3 passes catch
-  rows the virtualized list skipped.
+- **Delete** targets are decided by `isDeleteTarget` (fake and dated on/after the cutoff day),
+  used by both Scan's count and Delete. Delete ticks the targets on screen, re-checks the
+  selection, clicks the toolbar Delete, and waits for the rows to disappear. Up to 3 passes catch
+  rows the virtualized list skipped; `lastRun` only advances when the last pass deleted nothing.
+- **Auto-scan** runs only when a `lastRun` exists, and any real wheel, touch or key event stops
+  it. A stopped scan stores no result and does not scroll back.
 
 ## Outlook page quirks (each one cost time to discover)
 
@@ -57,6 +60,12 @@ Commit as the repo-local identity `Filaipus <6901771+Filaipus@users.noreply.gith
   on `<html>` and are re-attached every 700 ms.
 - **Hidden tabs**: Outlook stops rendering the list when the tab is in the background
   (`visibilityState === 'hidden'`, 0 rows). Everything waits for the tab to be visible.
+- **Selection**: ticking a row's checkbox replaces the selection of the open message (it is
+  not added to it). Outlook shows no selection count anywhere readable (the only "selected"
+  text is the folder pane), so the delete guard compares ticked rows on screen with the batch's
+  targets and never scrolls while anything is ticked.
+- **Re-renders after clicks**: clicking a checkbox can re-render the list, so row indices shift.
+  Always re-query rows after a click; never reuse an index or element from before it.
 - **No zoom tricks**: setting `body.style.zoom` shows more rows but breaks scrolling.
 - **Row buttons** label themselves with CSS `::after`, so their text never leaks into
   `innerText` (which the parser reads). Clicks on them are swallowed in the capture phase so
