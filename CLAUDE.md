@@ -54,7 +54,7 @@ Commit as the repo-local identity `Filaipus <6901771+Filaipus@users.noreply.gith
   `aria-checked`; Delete is the `button` whose aria-label or text is exactly `Delete`; the open
   message body is `[aria-label="Message body"]`.
 - **Row text**: the sender address line is `<addr>`. Rows with no address show the literal
-  `<no sender address>`. Dates are `HH:MM` (today), `Tue 10/20` (this year) or `26/10/14`
+  `<no sender address>`. Dates are `HH:MM` (today), `Sun 16:49` (the past week), `Tue 10/20` (this year) or `26/10/14`
   (yy/mm/dd).
 - **Virtualized list**: only ~6–20 rows exist in the DOM at a time. Scan by scrolling 80% of a
   screen at a time and de-duplicating rows.
