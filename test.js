@@ -90,6 +90,11 @@ assert.strictEqual(parseDate(['10:16'], now).getDate(), 16);
 assert.strictEqual(parseDate(['Tue 10/20'], now).toDateString(), new Date(2026, 9, 20).toDateString());
 assert.strictEqual(parseDate(['Mon 12/28'], now).getFullYear(), 2025); // a future date means last year
 assert.strictEqual(parseDate(['26/10/14'], now).toDateString(), new Date(2026, 9, 14).toDateString());
+// The past week shows weekday + time; now is Mon Nov 16, so the same weekday is a week ago.
+assert.strictEqual(parseDate(['Sun 16:49'], now).toDateString(), new Date(2026, 10, 15).toDateString());
+assert.strictEqual(parseDate(['Sat 09:09'], now).toDateString(), new Date(2026, 10, 14).toDateString());
+assert.strictEqual(parseDate(['Mon 08:00'], now).toDateString(), new Date(2026, 10, 9).toDateString());
+assert.strictEqual(parseDate(['Abc 08:00'], now), null);
 assert.strictEqual(parseDate(['no date here'], now), null);
 
 const row = parseRowText('C\nAlice\n<alice@example.com>\nRe: PR #12\n10:16\nbody');

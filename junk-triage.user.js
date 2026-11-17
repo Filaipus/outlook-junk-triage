@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Outlook Junk Triage
 // @namespace   outlook-junk-triage
-// @version     0.6.0
+// @version     0.6.1
 // @description Flag clearly fake senders in the Outlook.com Junk folder, mark senders fake or real in one click, delete fakes received since the last run, and collect unsubscribe links.
 // @homepageURL https://github.com/Filaipus/outlook-junk-triage
 // @updateURL   https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
@@ -105,11 +105,18 @@ function applyMark(stored, addr, verdict) {
   return out;
 }
 
-// Outlook shows "10:16" (today), "Tue 10/20" (this year) or "26/10/14" (yy/mm/dd, older).
+// Outlook shows "10:16" (today), "Sun 16:49" (the past week), "Tue 10/20" (this year) or
+// "26/10/14" (yy/mm/dd, older).
+const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 function parseDate(lines, now) {
   for (const s of lines) {
     let m;
     if (/^\d{1,2}:\d{2}$/.test(s)) return new Date(now);
+    if ((m = s.match(/^(\w{3}) \d{1,2}:\d{2}$/)) && WEEKDAYS.includes(m[1])) {
+      // Today shows only the time, so the same weekday means a week ago.
+      const back = (now.getDay() - WEEKDAYS.indexOf(m[1]) + 7) % 7 || 7;
+      return new Date(now.getFullYear(), now.getMonth(), now.getDate() - back);
+    }
     if ((m = s.match(/^\w{3} (\d{1,2})\/(\d{1,2})$/))) {
       const d = new Date(now.getFullYear(), +m[1] - 1, +m[2]);
       if (d > now) d.setFullYear(d.getFullYear() - 1);
