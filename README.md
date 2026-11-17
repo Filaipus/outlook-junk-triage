@@ -25,6 +25,11 @@ yourself stops that scan and leaves the list where you put it. On the very first
 no last run yet, so press **Scan** yourself; it reads the whole folder, which takes about a
 minute.
 
+The drop-down in the panel sets how far back Scan and Delete look: **Since last run** (the
+default), or the last 24 hours, 72 hours, 7 days or 30 days. Windows round down to the start of
+the day, because Outlook shows only a date for mail older than today. Your choice is kept until
+you change it.
+
 In the message list:
 
 - Clearly fake conversations are tinted red, with the reason next to them.
@@ -106,8 +111,10 @@ a backup.
   leftovers are picked up next time.
 - Only conversations dated on or after the day of the last completed run are touched. The
   first run covers the whole folder (Outlook keeps Junk for 30 days). A run you stop, or one
-  that halts on a safety check, does not move the date forward. To force a whole-folder sweep,
-  delete the `lastRun` value in the script's **Values** tab in Violentmonkey.
+  that halts on a safety check, does not move the date forward. To sweep further back, pick a
+  window such as **Last 30 days** in the drop-down.
+- The last-run date is kept in the script's storage and in Outlook's own site storage, so
+  reinstalling or updating the script does not reset it.
 
 ## Development
 
