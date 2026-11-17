@@ -36,7 +36,10 @@ Commit as the repo-local identity `Filaipus <6901771+Filaipus@users.noreply.gith
   companies, single addresses on `SHARED_PROVIDERS` (gmail, hotmail, live …).
 - **Since last run**: `GM_getValue('lastRun')` holds the time of the last completed delete (or
   an empty one). The cutoff is the start of that day; no value means the whole folder. A run
-  that is stopped or hits a safety stop does not advance it.
+  that is stopped or hits a safety stop does not advance it. `lastRun` and the look-back
+  `window` (hours, from the panel drop-down; empty = since last run) go through `recall` /
+  `remember`, which mirror them to the page's `localStorage` (`junkTriage.*`) so a reinstall
+  or a lost script store doesn't reset them. A window wins over `lastRun` (`cutoffFrom`).
 - **Delete** targets are decided by `isDeleteTarget` (fake and dated on/after the cutoff day),
   used by both Scan's count and Delete. Delete ticks the targets on screen, re-checks the
   selection, clicks the toolbar Delete, and waits for the rows to disappear. Up to 3 passes catch

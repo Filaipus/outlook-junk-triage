@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name        Outlook Junk Triage
 // @namespace   outlook-junk-triage
-// @version     0.5.1
+// @version     0.6.0
 // @description Flag clearly fake senders in the Outlook.com Junk folder, mark senders fake or real in one click, delete fakes received since the last run, and collect unsubscribe links.
 // @homepageURL https://github.com/Filaipus/outlook-junk-triage
 // @updateURL   https://raw.githubusercontent.com/Filaipus/outlook-junk-triage/main/junk-triage.user.js
@@ -143,6 +143,16 @@ function layoutSteps(layout) {
   return Object.entries(layout || {}).filter(([k, v]) => paths[k] && v).map(([k, v]) => [...paths[k], v]);
 }
 
+// Start of the day the next Scan/Delete looks back to. A chosen window (hours) wins; otherwise the
+// day of the last completed run; with neither, the whole folder. Rounded to the day because Outlook
+// shows only a date for mail older than today.
+function cutoffFrom(lastRun, windowHours, now) {
+  const d = windowHours > 0 ? new Date(now - windowHours * 3600e3) : lastRun ? new Date(lastRun) : null;
+  if (!d || isNaN(d)) return new Date(0);
+  d.setHours(0, 0, 0, 0);
+  return d;
+}
+
 // True when dates (newest first, nulls skipped) never go up: the list is sorted newest first.
 function isNewestFirst(dates) {
   const d = dates.filter(Boolean);
@@ -172,9 +182,12 @@ function init() {
   const rowInfo = o => { const r = parseRowText(o.innerText); return { ...r, date: parseDate(r.lines, new Date()), why: classify(r, rules) }; };
   const deleteButton = () => [...document.querySelectorAll('button')]
     .find(b => /^Delete$/i.test((b.getAttribute('aria-label') || b.innerText || '').trim().split('\n')[0]));
-  // Only look at mail since the start of the day of the last completed run (Junk empties itself
-  // after 30 days, so the first run, with no last run yet, covers the whole folder).
-  const cutoff = () => { const v = GM_getValue('lastRun', ''); if (!v) return new Date(0); const d = new Date(v); d.setHours(0, 0, 0, 0); return d; };
+  // Saved in the script's storage and mirrored to outlook.live.com's localStorage, so a reinstall
+  // or a script-storage reset doesn't throw away the last run.
+  const recall = k => GM_getValue(k, '') || (() => { try { return localStorage.getItem('junkTriage.' + k) || ''; } catch { return ''; } })();
+  const remember = (k, v) => { GM_setValue(k, v); try { localStorage.setItem('junkTriage.' + k, v); } catch { /* storage blocked */ } };
+  // Junk empties itself after 30 days, so with no last run and no window this is the whole folder.
+  const cutoff = () => cutoffFrom(recall('lastRun'), +recall('window'), new Date());
   const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const since = () => (cutoff().getTime() ? `since ${cutoff().toDateString()}` : 'in the whole folder');
   // Outlook stops rendering the list in background tabs, so pause until the tab is visible again.
@@ -205,6 +218,13 @@ function init() {
   const bar = document.createElement('div'); bar.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin:8px 0';
   [['scan', 'Scan'], ['delete', 'Delete fakes'], ['unsub', 'Unsubscribe links'], ['layout', 'Fix layout'], ['report', 'Save report'], ['rules', 'Rules'], ['stop', 'Stop']]
     .forEach(([a, label]) => { const b = document.createElement('button'); b.dataset.a = a; b.textContent = label; bar.appendChild(b); });
+  // Look-back window for Scan and Delete; "since last run" is the default.
+  const windowPick = document.createElement('select'); windowPick.title = 'How far back Scan and Delete look';
+  [['', 'Since last run'], ['24', 'Last 24 hours'], ['72', 'Last 72 hours'], ['168', 'Last 7 days'], ['720', 'Last 30 days']]
+    .forEach(([v, label]) => windowPick.append(new Option(label, v)));
+  windowPick.value = recall('window');
+  windowPick.addEventListener('change', () => { remember('window', windowPick.value); lastScan = null; badge(''); status(`Scan and Delete now look ${since()}.`); });
+  bar.appendChild(windowPick);
   const statusLine = document.createElement('div'); statusLine.style.whiteSpace = 'pre-wrap';
   const list = document.createElement('div'); list.style.cssText = 'max-height:220px;overflow:auto;margin-top:6px';
   panel.append(title, bar, statusLine, list);
@@ -258,7 +278,7 @@ function init() {
     if (rules.autoScan && !autoScanned && !busy && document.visibilityState === 'visible' && rowsNow().length) {
       autoScanned = true;
       // A first run would scroll the whole folder (about a minute), so leave that to the Scan button.
-      if (!GM_getValue('lastRun', '')) return badge('first run: press Scan');
+      if (!cutoff().getTime()) return badge('first run: press Scan');
       autoRunning = true;
       run(() => scan({ untilCutoff: true })).finally(() => { autoRunning = false; });
     }
@@ -384,7 +404,7 @@ function init() {
     if (!scanResult) return;
     const cut = cutoff();
     const planned = scanResult.fake.filter(r => r.target).length;
-    if (!planned) { status(`Nothing to delete ${since()}.`); GM_setValue('lastRun', scanResult.at); return badge(`clean ${since()}`); }
+    if (!planned) { status(`Nothing to delete ${since()}.`); remember('lastRun', scanResult.at); return badge(`clean ${since()}`); }
     if (!confirm(`Move ${planned} clearly fake conversations ${since()} to Deleted Items?`)) return;
     let total = 0; let clean = false;
     // Extra passes catch rows the list skipped while re-rendering, and mail that arrived mid-run.
@@ -396,7 +416,7 @@ function init() {
     }
     lastScan = null;
     // Only a run whose last pass found nothing moves the cutoff forward, so leftovers are redone next time.
-    if (clean && !stopRequested) { GM_setValue('lastRun', scanResult.at); badge(`clean ${since()}`); }
+    if (clean && !stopRequested) { remember('lastRun', scanResult.at); badge(`clean ${since()}`); }
     const leftover = !clean && !stopRequested ? '\nSome fakes may remain; run Delete fakes again.' : '';
     status(`${stopRequested ? 'Stopped' : 'Done'}: moved ${total} conversations to Deleted Items.${leftover}${fewRowsTip()}`);
   }
@@ -513,5 +533,5 @@ function init() {
   });
 }
 
-if (typeof module !== 'undefined') module.exports = { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, layoutSteps, DEFAULT_RULES };
+if (typeof module !== 'undefined') module.exports = { cutoffFrom, classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, layoutSteps, DEFAULT_RULES };
 else init();

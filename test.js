@@ -1,6 +1,6 @@
 // Run: node test.js — checks the classifier, date parsing and row parsing on sample Junk rows.
 const assert = require('assert');
-const { classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, layoutSteps, DEFAULT_RULES } = require('./junk-triage.user.js');
+const { cutoffFrom, classify, parseDate, parseRowText, mergeRules, applyMark, isNewestFirst, isDeleteTarget, layoutSteps, DEFAULT_RULES } = require('./junk-triage.user.js');
 
 // Fix layout: each setting maps to its path in Outlook's View ribbon; unknown or empty ones are skipped.
 assert.deepStrictEqual(layoutSteps(DEFAULT_RULES.layout), [
@@ -29,6 +29,14 @@ assert.ok(isDeleteTarget({ why: 'random domain', date: new Date(2026, 10, 12) },
 assert.ok(!isDeleteTarget({ why: 'random domain', date: new Date(2026, 10, 9, 23, 59) }, cutDay), 'day before');
 assert.ok(!isDeleteTarget({ why: 'random domain', date: null }, cutDay), 'no date');
 assert.ok(!isDeleteTarget({ why: null, date: new Date(2026, 10, 12) }, cutDay), 'real sender');
+
+// Look-back cutoff: a window wins over the last run; either rounds down to the start of its day.
+const today = new Date(2026, 10, 17, 9, 30);
+assert.deepStrictEqual(cutoffFrom('', 0, today), new Date(0), 'first run: whole folder');
+assert.deepStrictEqual(cutoffFrom(new Date(2026, 10, 12, 18).toISOString(), 0, today), new Date(2026, 10, 12));
+assert.deepStrictEqual(cutoffFrom(new Date(2026, 10, 12).toISOString(), 24, today), new Date(2026, 10, 16), '24 hours');
+assert.deepStrictEqual(cutoffFrom('', 168, today), new Date(2026, 10, 10), '7 days, no last run');
+assert.deepStrictEqual(cutoffFrom('garbage', 0, today), new Date(0), 'unreadable last run');
 
 const fake = [
   [{ name: '✅Healthcare.com', addr: '', subj: 'Medicare' }, 'no sender address'],
