@@ -186,6 +186,8 @@ function init() {
   // or a script-storage reset doesn't throw away the last run.
   const recall = k => GM_getValue(k, '') || (() => { try { return localStorage.getItem('junkTriage.' + k) || ''; } catch { return ''; } })();
   const remember = (k, v) => { GM_setValue(k, v); try { localStorage.setItem('junkTriage.' + k, v); } catch { /* storage blocked */ } };
+  // Copy what either store already holds into both, so values saved before this version are kept too.
+  ['lastRun', 'window'].forEach(k => { const v = recall(k); if (v) remember(k, v); });
   // Junk empties itself after 30 days, so with no last run and no window this is the whole folder.
   const cutoff = () => cutoffFrom(recall('lastRun'), +recall('window'), new Date());
   const ymd = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
@@ -223,7 +225,10 @@ function init() {
   [['', 'Since last run'], ['24', 'Last 24 hours'], ['72', 'Last 72 hours'], ['168', 'Last 7 days'], ['720', 'Last 30 days']]
     .forEach(([v, label]) => windowPick.append(new Option(label, v)));
   windowPick.value = recall('window');
-  windowPick.addEventListener('change', () => { remember('window', windowPick.value); lastScan = null; badge(''); status(`Scan and Delete now look ${since()}.`); });
+  windowPick.addEventListener('change', () => {
+    // A running scan or delete already chose its cutoff; changing it midway would mix two windows.
+    if (busy) { windowPick.value = recall('window'); return status('Busy — press Stop first.'); }
+    remember('window', windowPick.value); lastScan = null; badge(''); status(`Scan and Delete now look ${since()}.`); });
   bar.appendChild(windowPick);
   const statusLine = document.createElement('div'); statusLine.style.whiteSpace = 'pre-wrap';
   const list = document.createElement('div'); list.style.cssText = 'max-height:220px;overflow:auto;margin-top:6px';
